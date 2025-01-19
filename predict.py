@@ -23,11 +23,11 @@ from diffusers.pipelines.stable_diffusion.safety_checker import (
 )
 
 MAX_IMAGE_SIZE = 1440
-MODEL_CACHE = "FLUX.1-dev"
+MODEL_CACHE = "FLUX.1-schnell"
 SAFETY_CACHE = "safety-cache"
 FEATURE_EXTRACTOR = "/src/feature-extractor"
 SAFETY_URL = "https://weights.replicate.delivery/default/sdxl/safety-1.0.tar"
-MODEL_URL = "https://weights.replicate.delivery/default/black-forest-labs/FLUX.1-dev/files.tar"
+MODEL_URL = "https://weights.replicate.delivery/default/black-forest-labs/FLUX.1-schnell/files.tar"
 
 ASPECT_RATIOS = {
     "1:1": (1024, 1024),
