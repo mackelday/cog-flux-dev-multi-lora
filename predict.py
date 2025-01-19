@@ -126,7 +126,7 @@ class Predictor(BasePredictor):
     def load_loras(self, lora_names, lora_scales):
         """
         Load LoRA weights from a local 'loras' folder. 
-        Each entry in lora_names is the file name inside ./loras, e.g. 'Cyberpunk Anime.safetensors'.
+        Each entry in lora_names is the file name inside ./loras, e.g. 'Cyberpunk Anime'.
         """
         names = [
             'a','b','c','d','e','f','g','h','i','j','k','l','m',
