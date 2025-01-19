@@ -2,8 +2,6 @@
 # Reference: https://cog.run/yaml
 
 build:
-  copy:
-    - . /src
   gpu: true
   cuda: "12.4"
   python_version: "3.11"
