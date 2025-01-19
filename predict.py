@@ -16,8 +16,6 @@ from diffusers import (
 )
 from torchvision import transforms
 from transformers import CLIPImageProcessor
-# Removed the WeightsDownloadCache import since we aren't downloading local LoRAs
-# from weights import WeightsDownloadCache
 from lora_loading_patch import load_lora_into_transformer
 from diffusers.pipelines.stable_diffusion.safety_checker import (
     StableDiffusionSafetyChecker
@@ -125,25 +123,29 @@ class Predictor(BasePredictor):
     def make_multiple_of_16(n):
         return ((n + 15) // 16) * 16
 
-    def load_loras(self, local_loras, lora_scales):
-        """Load LoRA weights from a local folder instead of URLs."""
+    def load_loras(self, lora_names, lora_scales):
+        """
+        Load LoRA weights from a local 'loras' folder. 
+        Each entry in lora_names is the file name inside ./loras, e.g. 'Cyberpunk Anime.safetensors'.
+        """
         names = [
             'a','b','c','d','e','f','g','h','i','j','k','l','m',
             'n','o','p','q','r','s','t','u','v','w','x','y','z'
         ]
         count = 0
 
-        for lora_path in local_loras:
-            if not os.path.exists(lora_path):
-                raise FileNotFoundError(f"Could not find LoRA file at: {lora_path}")
+        for lora_filename in lora_names:
+            local_path = os.path.join("loras", lora_filename)
+            if not os.path.exists(local_path):
+                raise FileNotFoundError(f"Could not find LoRA file at: {local_path}")
             adapter_name = names[count]
             count += 1
-            print(f"Loading LoRA from local file: {lora_path}")
-            self.txt2img_pipe.load_lora_weights(lora_path, adapter_name=adapter_name)
+            print(f"Loading LoRA from local file: {local_path}")
+            self.txt2img_pipe.load_lora_weights(local_path, adapter_name=adapter_name)
 
         adapter_names = names[:count]
         adapter_weights = lora_scales[:count]
-        self.last_loaded_loras = local_loras
+        self.last_loaded_loras = lora_names
         self.txt2img_pipe.set_adapters(adapter_names, adapter_weights=adapter_weights)
             
     @torch.inference_mode()
@@ -190,8 +192,8 @@ class Predictor(BasePredictor):
             le=100,
         ),
         hf_loras: list[str] = Input(
-            description="Paths to local LoRA files (instead of URLs).",
-            default=None,
+            description="List of file names in the 'loras' folder. Defaults to Cyberpunk Anime.",
+            default=["Cyberpunk Anime.safetensors"],  # Set default LoRA
         ),
         lora_scales: list[float] = Input(
             description="Scale for the LoRA weights. Default value is 0.8 if nothing is provided.",
@@ -243,22 +245,19 @@ class Predictor(BasePredictor):
             print("txt2img mode")
             pipe = self.txt2img_pipe
         
+        # If user set hf_loras to an empty list, it means no LoRAs, so unload.
+        # Otherwise, load from local "loras" folder.
         if hf_loras:
             flux_kwargs["joint_attention_kwargs"] = {"scale": 1.0}
-            # If these LoRAs differ from the last ones, unload old ones first
             if hf_loras != self.last_loaded_loras:
                 pipe.unload_lora_weights()
-                # Check for hf_loras and lora_scales
-                if hf_loras and not lora_scales:
-                    # If no lora_scales are provided, use 0.8 for each
+                if not lora_scales:
+                    # If no lora_scales provided, default each to 0.8
                     lora_scales = [0.8] * len(hf_loras)
-                    self.load_loras(hf_loras, lora_scales)
-                elif hf_loras and len(lora_scales) == 1:
-                    # If only one scale is provided, use it for all
+                elif len(lora_scales) == 1 and len(hf_loras) > 1:
+                    # If only one scale is provided, apply to all
                     lora_scales = [lora_scales[0]] * len(hf_loras)
-                    self.load_loras(hf_loras, lora_scales)
-                elif hf_loras and len(lora_scales) >= len(hf_loras):
-                    self.load_loras(hf_loras, lora_scales)
+                self.load_loras(hf_loras, lora_scales)
         else:
             flux_kwargs["joint_attention_kwargs"] = None
             pipe.unload_lora_weights()
@@ -283,15 +282,15 @@ class Predictor(BasePredictor):
             _, has_nsfw_content = self.run_safety_checker(output.images)
 
         output_paths = []
-        for i, image in enumerate(output.images):
+        for i, img in enumerate(output.images):
             if not disable_safety_checker and has_nsfw_content[i]:
                 print(f"NSFW content detected in image {i}")
                 continue
             output_path = f"/tmp/out-{i}.{output_format}"
             if output_format != 'png':
-                image.save(output_path, quality=output_quality, optimize=True)
+                img.save(output_path, quality=output_quality, optimize=True)
             else:
-                image.save(output_path)
+                img.save(output_path)
             output_paths.append(Path(output_path))
 
         if len(output_paths) == 0:
