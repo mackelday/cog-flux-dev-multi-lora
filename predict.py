@@ -17,7 +17,7 @@ from lora_loading_patch import load_lora_into_transformer
 from diffusers.pipelines.stable_diffusion.safety_checker import (
     StableDiffusionSafetyChecker
 )
-from realesrgan import RealESRGAN  # Added import for AI upscaler
+import cv2  # Import OpenCV for FSRCNN
 
 MAX_IMAGE_SIZE = 1440
 MODEL_CACHE = "FLUX.1-schnell"
@@ -64,7 +64,7 @@ class Predictor(BasePredictor):
             SAFETY_CACHE, torch_dtype=torch.float16
         ).to("cuda")
         self.feature_extractor = CLIPImageProcessor.from_pretrained(FEATURE_EXTRACTOR)
-        
+
         print("Loading Flux txt2img Pipeline")
         if not os.path.exists(MODEL_CACHE):
             download_weights(MODEL_URL, '.')
@@ -90,12 +90,15 @@ class Predictor(BasePredictor):
         self.img2img_pipe.__class__.load_lora_into_transformer = classmethod(
             load_lora_into_transformer
         )
-        
-        # Setup RealESRGAN upscaler
-        print("Loading RealESRGAN upscaler...")
-        self.upscaler = RealESRGAN("cuda", scale=4)
-        # Assuming weights are available locally or can be downloaded automatically
-        self.upscaler.load_weights('RealESRGAN_x4.pth')
+
+        # Setup FSRCNN upscaler
+        print("Loading FSRCNN upscaler...")
+        self.upscaler = cv2.dnn_superres.DnnSuperResImpl_create()
+        fsrcnn_weights = "FSRCNN_x4.pb"
+        if not os.path.exists(fsrcnn_weights):
+            raise FileNotFoundError(f"FSRCNN weights not found: {fsrcnn_weights}")
+        self.upscaler.readModel(fsrcnn_weights)
+        self.upscaler.setModel("fsrcnn", 4)
 
         print("setup took: ", time.time() - start)
 
@@ -147,7 +150,7 @@ class Predictor(BasePredictor):
         adapter_weights = lora_scales[:count]
         self.last_loaded_loras = lora_names
         self.txt2img_pipe.set_adapters(adapter_names, adapter_weights=adapter_weights)
-            
+
     @torch.inference_mode()
     def predict(
         self,
@@ -227,7 +230,7 @@ class Predictor(BasePredictor):
         flux_kwargs = {"width": width, "height": height}
         print(f"Prompt: {prompt}")
         device = self.txt2img_pipe.device
-        
+
         if image:
             pipe = self.img2img_pipe
             print("img2img mode")
@@ -251,7 +254,7 @@ class Predictor(BasePredictor):
         else:
             print("txt2img mode")
             pipe = self.txt2img_pipe
-        
+
         if hf_loras:
             flux_kwargs["joint_attention_kwargs"] = {"scale": 1.0}
             if hf_loras != self.last_loaded_loras:
@@ -298,19 +301,19 @@ class Predictor(BasePredictor):
         if len(output_paths) == 0:
             raise Exception("NSFW content detected. Try running it again, or try a different prompt.")
 
-        # Upscale images to target dimensions using RealESRGAN
+        # Upscale images to target dimensions using FSRCNN
         upscaled_paths = []
         for path in output_paths:
             img = Image.open(path).convert("RGB")
-            # Use RealESRGAN to upscale the image
-            sr_image = self.upscaler.predict(np.array(img))
+            np_img = np.array(img)
+            upscaled_img = self.upscaler.upsample(np_img)
             # Resize to the exact target dimensions
-            sr_image = sr_image.resize((target_width, target_height), Image.LANCZOS)
+            upscaled_img = Image.fromarray(upscaled_img).resize((target_width, target_height), Image.LANCZOS)
             upscaled_path = str(path).replace(".", f"-upscaled.")
             if output_format != 'png':
-                sr_image.save(upscaled_path, quality=output_quality, optimize=True)
+                upscaled_img.save(upscaled_path, quality=output_quality, optimize=True)
             else:
-                sr_image.save(upscaled_path)
+                upscaled_img.save(upscaled_path)
             upscaled_paths.append(Path(upscaled_path))
 
         return upscaled_paths
