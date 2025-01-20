@@ -1,6 +1,3 @@
-# Prediction interface for Cog ⚙️
-# https://github.com/replicate/cog/blob/main/docs/python.md
-
 from cog import BasePredictor, Input, Path
 import os
 import re
@@ -20,6 +17,7 @@ from lora_loading_patch import load_lora_into_transformer
 from diffusers.pipelines.stable_diffusion.safety_checker import (
     StableDiffusionSafetyChecker
 )
+from realesrgan import RealESRGAN  # Added import for AI upscaler
 
 MAX_IMAGE_SIZE = 1440
 MODEL_CACHE = "FLUX.1-schnell"
@@ -93,6 +91,12 @@ class Predictor(BasePredictor):
             load_lora_into_transformer
         )
         
+        # Setup RealESRGAN upscaler
+        print("Loading RealESRGAN upscaler...")
+        self.upscaler = RealESRGAN("cuda", scale=4)
+        # Assuming weights are available locally or can be downloaded automatically
+        self.upscaler.load_weights('RealESRGAN_x4.pth')
+
         print("setup took: ", time.time() - start)
 
     @torch.amp.autocast('cuda')
@@ -124,10 +128,6 @@ class Predictor(BasePredictor):
         return ((n + 15) // 16) * 16
 
     def load_loras(self, lora_names, lora_scales):
-        """
-        Load LoRA weights from a local 'loras' folder. 
-        Each entry in lora_names is the file name inside ./loras, e.g. 'Cyberpunk Anime'.
-        """
         names = [
             'a','b','c','d','e','f','g','h','i','j','k','l','m',
             'n','o','p','q','r','s','t','u','v','w','x','y','z'
@@ -163,7 +163,7 @@ class Predictor(BasePredictor):
         ),
         prompt_strength: float = Input(
             description="Prompt strength (or denoising strength) when using image to image. 1.0 corresponds to full destruction of information in the image.",
-            ge=0,le=1,default=0.5,  # Updated default for Schnell
+            ge=0, le=1, default=0.5,
         ),
         num_outputs: int = Input(
             description="Number of images to output.",
@@ -173,11 +173,15 @@ class Predictor(BasePredictor):
         ),
         num_inference_steps: int = Input(
             description="Number of inference steps",
-            ge=1,le=50,default=4,  # Updated default for Schnell
+            ge=1,
+            le=50,
+            default=4,
         ),
         guidance_scale: float = Input(
             description="Guidance scale for the diffusion process",
-            ge=0,le=10,default=5.0,  # Updated default for Schnell
+            ge=0,
+            le=10,
+            default=5.0,
         ),
         seed: int = Input(description="Random seed. Set for reproducible generation", default=None),
         output_format: str = Input(
@@ -193,7 +197,7 @@ class Predictor(BasePredictor):
         ),
         hf_loras: list[str] = Input(
             description="List of file names in the 'loras' folder. Defaults to Cyberpunk Anime.",
-            default=["Cyberpunk Anime.safetensors"],  # Set default LoRA
+            default=["Cyberpunk Anime.safetensors"],
         ),
         lora_scales: list[float] = Input(
             description="Scale for the LoRA weights. Default value is 0.8 if nothing is provided.",
@@ -202,6 +206,14 @@ class Predictor(BasePredictor):
         disable_safety_checker: bool = Input(
             description="Disable safety checker for generated images. This feature is only available through the API.",
             default=False,
+        ),
+        target_width: int = Input(
+            description="Desired width for the upscaled image",
+            default=2048
+        ),
+        target_height: int = Input(
+            description="Desired height for the upscaled image",
+            default=2048
         ),
     ) -> List[Path]:
         """Run a single prediction on the model"""
@@ -223,46 +235,36 @@ class Predictor(BasePredictor):
             width = init_image.shape[-1]
             height = init_image.shape[-2]
             print(f"Input image size: {width}x{height}")
-            # Calculate the scaling factor if the image exceeds MAX_IMAGE_SIZE
             scale = min(MAX_IMAGE_SIZE / width, MAX_IMAGE_SIZE / height, 1)
             if scale < 1:
                 width = int(width * scale)
                 height = int(height * scale)
                 print(f"Scaling image down to {width}x{height}")
-
-            # Round image width and height to nearest multiple of 16
             width = self.make_multiple_of_16(width)
             height = self.make_multiple_of_16(height)
             print(f"Input image size set to: {width}x{height}")
-            # Resize
             init_image = init_image.to(device)
             init_image = torch.nn.functional.interpolate(init_image, (height, width))
             init_image = init_image.to(torch.bfloat16)
-            # Set params
             flux_kwargs["image"] = init_image
             flux_kwargs["strength"] = prompt_strength
         else:
             print("txt2img mode")
             pipe = self.txt2img_pipe
         
-        # If user set hf_loras to an empty list, it means no LoRAs, so unload.
-        # Otherwise, load from local "loras" folder.
         if hf_loras:
             flux_kwargs["joint_attention_kwargs"] = {"scale": 1.0}
             if hf_loras != self.last_loaded_loras:
                 pipe.unload_lora_weights()
                 if not lora_scales:
-                    # If no lora_scales provided, default each to 0.8
                     lora_scales = [0.8] * len(hf_loras)
                 elif len(lora_scales) == 1 and len(hf_loras) > 1:
-                    # If only one scale is provided, apply to all
                     lora_scales = [lora_scales[0]] * len(hf_loras)
                 self.load_loras(hf_loras, lora_scales)
         else:
             flux_kwargs["joint_attention_kwargs"] = None
             pipe.unload_lora_weights()
 
-        # Ensure the pipeline is on GPU
         pipe = pipe.to("cuda")
 
         generator = torch.Generator("cuda").manual_seed(seed)
@@ -296,4 +298,19 @@ class Predictor(BasePredictor):
         if len(output_paths) == 0:
             raise Exception("NSFW content detected. Try running it again, or try a different prompt.")
 
-        return output_paths
+        # Upscale images to target dimensions using RealESRGAN
+        upscaled_paths = []
+        for path in output_paths:
+            img = Image.open(path).convert("RGB")
+            # Use RealESRGAN to upscale the image
+            sr_image = self.upscaler.predict(np.array(img))
+            # Resize to the exact target dimensions
+            sr_image = sr_image.resize((target_width, target_height), Image.LANCZOS)
+            upscaled_path = str(path).replace(".", f"-upscaled.")
+            if output_format != 'png':
+                sr_image.save(upscaled_path, quality=output_quality, optimize=True)
+            else:
+                sr_image.save(upscaled_path)
+            upscaled_paths.append(Path(upscaled_path))
+
+        return upscaled_paths
